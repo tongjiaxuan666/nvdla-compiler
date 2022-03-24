@@ -142,6 +142,10 @@
 ## 1.3.软硬件分析文章参考 ##
 
 	https://github.com/JunningWu/Learning-NVDLA-Notes
+## 1.4 NVDLA FPGA实现参考 ##
+	https://zhuanlan.zhihu.com/p/378202360
+## 1.5 Tengine框架对NVDLA的支持 ##
+	https://zhuanlan.zhihu.com/p/401943271
 # 2.源代码结构 #
 
 ## 2.1.整体代码目录结构 ##
