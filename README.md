@@ -190,7 +190,8 @@
 ![](https://github.com/zeasa/nvdla-compiler/raw/master/document/imgs/logswitch.png)
 
 上图中在Graph这个类里面，有许多的log日志开关，只需将红框中的false改为true就可以打开这个class的日志输出。类似的开关还有很多，需要在读到相关class部分代码的时候有需要的打开。以编译一个Lenet5的网络为例，输出的日志在10000行左右，这个log.txt在本repo的model&log文件夹里可以找到。
-
+### 4.1.3. 日志系统具体debug内容
+​	ToDo
 ## 4.2.runtime部分 ##
 
 ### 4.2.1.总体概述
@@ -202,7 +203,6 @@
 ​	ToDo
 
 ## 4.3.compiler部分 ##
-
 ### 4.3.1.总体概述
 
 ​	compiler部分的代码主要在sw/umd/core/src/compiler目录里，经过阅读，发现nvdla现有的compiler代码前端只支持caffe一种前端框架，在调用compiler进行模型编译的时候，命令行参数需要指定caffe模型的prototxt文件以及train好的model的部署文件(包括了weight和bias等参数)。caffe模型的prototxt文件格式具体可以参考caffe框架相关文档。以下是一个prototxt文件的一部分：
@@ -2180,3 +2180,14 @@ NvDlaError engine_ast::ConvCoreNode::captureCanonicalWeights()
 ### 4.3.6.代码流程分析-EngineAST中间IR变换与优化PASS
 
 ### 4.3.7.代码流程分析-EngineAST到后端代码Emit（代码生成）
+# 5.Tengine 与 NVDLA对接部分代码解析 #
+## 5.1总体结构分析##
+ 代码在https://github.com/OAID/Tengine 仓库下的source/device/opendla目录下，代码的主要内容就是将Tengine的ir_graph转换为NVDLA的Canoncial AST
+ - op 定义NVDLA支持的算子，包括batchnorm,concat,convolution,deconv,eltwise,fc,pooling,relu,scale,split等等。
+ - odla_define 定义NVDLA设备的名称
+ - odla_device NVDLA设备注册，注销等
+ - odla_dump debug信息
+ - odla_executor Tengine ir_graph抽象语法树与NVDLA Canoncial AST抽象语法树的对接，engineast pass,和NVDLA runtime的调度。
+ - odla_graph NVDLA图信息的塞入和释放
+ - odla_limit定义NVDLA支持的算子
+# 6.内核驱动程序的解析 # 
