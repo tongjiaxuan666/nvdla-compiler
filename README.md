@@ -49,6 +49,8 @@
   2. 从docker运行nvdla虚拟模拟器
 
 	```
+        $ sudo apt install docker.io
+	*在ubuntu下载docker*
 	$ docker pull nvdla/vp
 	*从dockerhub里下载nvdla/vp镜像*
 
