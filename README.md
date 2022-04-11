@@ -193,7 +193,7 @@
 
 上图中在Graph这个类里面，有许多的log日志开关，只需将红框中的false改为true就可以打开这个class的日志输出。类似的开关还有很多，需要在读到相关class部分代码的时候有需要的打开。以编译一个Lenet5的网络为例，输出的日志在10000行左右，这个log.txt在本repo的model&log文件夹里可以找到。
 ### 4.1.3. 日志系统具体debug内容
-​	ToDo
+
 ## 4.2.runtime部分 ##
 
 ### 4.2.1.总体概述
@@ -2178,10 +2178,372 @@ NvDlaError engine_ast::ConvCoreNode::captureCanonicalWeights()
 ```
 
 
+### 4.3.6.Node类与其派生类方法分析
+首先是Node类，这个类又派生出NVDLA的算子类，多态用虚函数进行实现，比如preProcessAux函数，如果不在派生类中进行重写直接返回NVDLA TRUE不做任何操作
+```
+class Node
+{
+public:
+    virtual std::string className() const { return std::string("Node"); }
+    virtual std::string pretty() const { return "<pretty-node>";} // override in specific nodes to add. careful...
 
-### 4.3.6.代码流程分析-EngineAST中间IR变换与优化PASS
+    static std::string prettyId(const Node *n, NvU8 flags = ast::PrettyId_Default)
+    {
+        if ( !n ) { return std::string("(null)"); }
+        std::stringstream r;  std::string sep("");
+        if ( flags & ast::PrettyId_Id )        { r << sep << n->id();        sep = " "; }
+        if ( flags & ast::PrettyId_ClassName ) { r << sep << n->className(); sep = " "; }
+        if ( flags & ast::PrettyId_Name )      { r << sep << n->name();      sep = " "; }
+        if ( flags & (ast::PrettyId_Verbose) )  { r << sep << n->pretty(); sep = " "; }
+        return r.str();
+    }
 
-### 4.3.7.代码流程分析-EngineAST到后端代码Emit（代码生成）
+
+    typedef engine_ast::Graph::NodeSequence NodeSequence;//Node队列
+    typedef engine_ast::Graph::EdgeSequence EdgeSequence;//Edge队列
+    typedef engine_ast::Graph::NodeSequenceIterator NodeSequenceIterator;//Node队列遍历器
+    typedef engine_ast::Graph::EdgeSequenceIterator EdgeSequenceIterator;//Edge队列遍历器
+
+    Node(NvU16 numBatches = 1) : m_containing_graph(0), m_taskId(-1)//构造函数
+    {
+        m_unique_id = m_next_id++;
+        m_mb_dependency_params = new MultiBatchState< DependencyParams >(numBatches);
+        m_sup_in_surf_formats  = std::vector< surface::SurfaceFormat >();
+        m_sup_out_surf_formats = std::vector< surface::SurfaceFormat >();
+        m_sup_aux_surf_formats = std::vector< surface::SurfaceFormat >();
+    }
+    virtual ~Node() { }//析构函数
+    virtual Node *clone () { return new Node(*this); }
+
+    const std::string id() const     { return m_id; }//返回Node序号
+    void setId(const std::string id) { m_id = id;   }//设置Node序号
+
+    NvU32 uniqueId() const { return m_unique_id;}
+
+    const std::string name() const       { return m_name; }
+    void setName(const std::string name) { m_name = name; }
+
+    inline Graph* graph() const { return m_containing_graph; }
+    void setGraph(Graph* g) { m_containing_graph = g; }
+
+    EngineType engineType() const     { return m_engine_type; }
+    void setEngineType(EngineType et) { m_engine_type = et;   }
+
+    EngineOpType engineOpType() const       { return m_engine_op_type; }
+    void setEngineOpType(EngineOpType eot)  { m_engine_op_type = eot;   }
+
+    bool isEMUEngineType() const  { return m_engine_type.e() == CPU; }
+    bool isDLAEngineType() const  { return !(m_engine_type.e() == CPU ||
+                                             m_engine_type.e() == SPLIT ||
+                                             m_engine_type.e() == CONCATENATION); }
+    bool isSoftwareNode() const   { return (m_engine_type.e() == SPLIT ||
+                                            m_engine_type.e() == CONCATENATION); }
+    virtual bool isEngineType(EngineType et) { return m_engine_type == et; }
+
+    virtual EngineParams& params(NvU16) { return EngineParamsNULL; }
+    virtual void inheritParams(Node*)   { return; }
+    virtual const void* getAuxData(Edge* auxEdge)    { return NULL; }
+    virtual Dims4 getAuxDims()          { return Dims4(-1,-1,-1,-1); }
+
+    virtual canonical_ast::Node *canonicalNode() const { return NULL; }
+
+    inline const std::vector< surface::SurfaceFormat >& supportedInSurfFormats() const { return m_sup_in_surf_formats; }
+    inline const std::vector< surface::SurfaceFormat >& supportedOutSurfFormats() const { return m_sup_out_surf_formats; }
+    inline const std::vector< surface::SurfaceFormat >& supportedAuxSurfFormats() const { return m_sup_aux_surf_formats; }
+
+    const std::vector< surface::SurfaceCategory > supportedInSurfCategories() const;
+    const std::vector< surface::SurfaceCategory > supportedOutSurfCategories() const;
+    const std::vector< surface::SurfaceCategory > supportedAuxSurfCategories() const;
+
+    bool dependsOn(Node *on, const std::vector<EdgeType> &requireVia, const std::vector<EdgeType> &allowVia) const;
+
+    std::vector< surface::TensorSurfaceDesc *> auxSurfaces() const;
+    std::vector< surface::TensorSurfaceDesc *> inputSurfaces() const;
+    std::vector< surface::TensorSurfaceDesc *> outputSurfaces() const;
+
+    void emitDependencyParams(DLAInterface* target_dla, DLACommonOpDescAccessor dep, NvU32 batchId);
+    void setDataCubeAccessor(DLADataCubeAccessor acc, surface::TensorSurfaceDesc* tsd, IODirection iod, NvU32 batchId);
+
+    virtual std::vector< surface::SurfaceFormat > suggestAuxSurfaceFormats(Edge* auxEdge);
+    std::vector< surface::SurfaceFormat > suggestOutputSurfaceFormats();
+    std::vector< surface::SurfaceFormat > suggestInputSurfaceFormats();
+    NvDlaError supportsSurfaceFormat(surface::SurfaceFormat, std::vector< surface::SurfaceFormat >);
+
+    virtual Dims4 suggestSurfaceDims(surface::TensorSurfaceDesc* tsd);
+    virtual NvU32 suggestLineStride(surface::TensorSurfaceDesc* tsd);
+    virtual NvU32 suggestSurfaceStride(surface::TensorSurfaceDesc* tsd);
+    virtual NvU64 suggestSurfaceSize(surface::TensorSurfaceDesc* tsd);
+    virtual NvU64 suggestSurfaceOffsetInBuffer(surface::TensorSurfaceDesc* tsd);
+    virtual memory::TensorBufferDesc* suggestBuffer(surface::TensorSurfaceDesc* tsd);
+
+    virtual NvDlaError preProcessAuxData() { return NvDlaSuccess; }//图像数据预处理
+    virtual Node*   mergeWithSDPOp(SDPNode* other_op) { return NULL; }
+    virtual NvDlaError updateScalingFactors() { return NvDlaSuccess; }
+    virtual NvDlaError quantizeAuxData() { return NvDlaSuccess; }//量化
+    virtual NvDlaError fuseOnTheFlyNodes() { return NvDlaSuccess; }
+    virtual NvDlaError handleLowPrecisionConversions() { return NvDlaSuccess; }/todo
+    virtual NvDlaError translateAuxData() { return NvDlaSuccess; }//转换数据信息
+    virtual NvDlaError splitNodes()     { return NvDlaSuccess; }
+    virtual NvDlaError handleMultiBatch() { return NvDlaSuccess; }
+    virtual NvDlaError resolveDataDependencies(Node* next);
+    virtual NvDlaError resolveComputeDependencies(const NodeSequence& ordered_nodes);
+    NvDlaError resolveSoftwareDependencies();
+    virtual NvDlaError resolveMultiBatchDependencies();
+    virtual NvDlaError selfAnnotate(NvS16& lastUsedAnnId);
+
+    virtual NvDlaError verifyEdgePorts() { return NvDlaSuccess; }//确认Edge的边信息
+    virtual NvDlaError verifySurfaceDims(surface::TensorSurfaceDesc*) { return NvDlaSuccess; }//确认Surface的维度
+    NvDlaError verifySurfaces();//确认surface
+    NvDlaError verifyDependencyParams();//确认独立的参量
+
+    const EdgeSequence& inputEdges() const { return m_input_edges; }
+    void markInputEdge(Edge* input)
+    {
+        if (std::find(m_input_edges.begin(), m_input_edges.end(), input) == m_input_edges.end())
+            m_input_edges.push_back(input);
+    }
+
+    const EdgeSequence& outputEdges() const { return m_output_edges; }
+    void markOutputEdge(Edge* output)
+    {
+        if (std::find(m_output_edges.begin(), m_output_edges.end(), output) == m_output_edges.end())
+        m_output_edges.push_back(output);
+    }
+
+    const EdgeSequence& auxEdges() const { return m_aux_edges; }
+    void markAuxEdge(Edge* aux)
+    {
+        if (std::find(m_aux_edges.begin(), m_aux_edges.end(), aux) == m_aux_edges.end())
+        m_aux_edges.push_back(aux);
+    }
+
+    // cache reference to input/aux/output edges of each node into the respective edge ports
+    virtual NvDlaError populateEdgePorts();
+    void unpopulateEdgePorts() { m_input_edges.clear(); m_aux_edges.clear(); m_output_edges.clear(); }
+    NvDlaError repopulateEdgePorts() { unpopulateEdgePorts(); return populateEdgePorts(); }
+
+    // get the data edge which matches any of the supplied tensor surface categories
+    NvDlaError nodeDataEdge(const std::vector<surface::SurfaceCategory>& types, ast::EdgeSideEnum dir, engine_ast::Edge** retEdge);
+    // get the data edge which matches the supplied raw tensor type (used when SD is not yet defined for the edge)
+    NvDlaError nodeDataEdge(TensorType raw_tt, ast::EdgeSideEnum dir, engine_ast::Edge** retEdge);
+
+    // get the aux edge associated with the node
+    virtual NvDlaError nodeAuxEdge(engine_ast::Edge **ret_edge) { *ret_edge = NULL; return NvDlaSuccess; }
+
+    virtual void captureCanonicalParams() { return; }
+   //设置独立参数
+    DependencyParams& dependencyParams()              { return m_mb_dependency_params->batch(0); }
+    DependencyParams& dependencyParams(NvU16 batchId) { return m_mb_dependency_params->batch(batchId); }
+
+    /* Code Emission and DLA interface APIs */
+    void setTaskId(NvS16 id) { m_taskId = id; }
+    NvS16 taskId() const { return m_taskId; }
+	//这里是输出一些Debug信息
+    inline bool debugWinograd() const { return true; }
+    inline bool debugSplits() const { return true; }
+    inline bool debugFusion() const { return true; }
+    inline bool debugResolveDependencies() const { return true; }
+
+    virtual NvDlaError emitOp(Graph *, DLAInterface *, NvU32 op_slot, NvU32 batch_id,
+                           DLACommonOpDescAccessor,
+                           DLAOperationContainerAccessor,
+                           DLASurfaceContainerAccessor);
+
+#ifdef NVDLA_COMPILER_OUTPUT_FOR_PROTOTEST
+    virtual NvDlaError emitOp(NvU32 /*op_slot*/, NvU32 /*batch_id*/,
+                           DLAInterface*,
+                           DLACommonOpDescAccessor&,
+                           DLAOperationContainerAccessor&,
+                           DLASurfaceContainerAccessor&,
+                           nvdla_prototest_interface::Layer*) { return NvDlaSuccess; }
+#endif
+
+    virtual NvDlaError emitOp(Graph *, EMUInterface *, NvU32 op_slot, NvU32 batch_id,
+                           EMUOperationContainerAccessor,
+                           EMUOperationBufferContainerAccessor);//释放算子，一般是输出算子往硬件传参情况
+
+    NvDlaError clearNodeTSDStateMapping()
+    {
+        m_nodeTSDSurfaceOffsetInBuffer.clear();
+        m_nodeTSDLineStride.clear();
+        m_nodeTSDSurfaceStride.clear();
+        m_nodeTSDSurfaceSize.clear();
+
+        return NvDlaSuccess;
+    }
+
+protected:
+    /* for clone */
+    Node(const Node &other) ://拷贝构造函数
+        m_id(other.m_id),
+        m_unique_id(m_next_id++),
+        m_name(other.m_name),
+        m_containing_graph(0),
+        m_engine_type(other.m_engine_type),
+        m_engine_op_type(other.m_engine_op_type),
+        m_aux_edges(other.m_aux_edges),
+        m_input_edges(other.m_input_edges),
+        m_output_edges(other.m_output_edges),
+        m_mb_dependency_params(other.m_mb_dependency_params),
+        m_sup_in_surf_formats(other.m_sup_in_surf_formats),
+        m_sup_aux_surf_formats(other.m_sup_aux_surf_formats),
+        m_sup_out_surf_formats(other.m_sup_out_surf_formats),
+        m_taskId(-1),
+        m_nodeTSDSurfaceOffsetInBuffer(),
+        m_nodeTSDLineStride(),
+        m_nodeTSDSurfaceStride(),
+        m_nodeTSDSurfaceSize()
+    {
+        // of all the attributes, you don't want the cloned node to inherit
+        // the containing_graph from orig node. The cloned node should belong
+        // to the new graph under construction. (see Graph(const Graph& other))
+    }
+
+    friend class Graph;//友元
+    std::string m_id; // unique within the graph
+    NvU32           m_unique_id; // id for graph ordering. u32 instead of string.float32类型代替string类型
+    static NvU32    m_next_id;//下个id值
+    std::string m_name;
+    Graph*      m_containing_graph;//Node所在的网络图
+    EngineType  m_engine_type;//引擎类型
+    EngineOpType m_engine_op_type;//引擎的算子类型
+    EdgeSequence m_aux_edges;       // definitive aux edge ports
+    EdgeSequence m_input_edges;     // definitive input edge ports
+    EdgeSequence m_output_edges;    // definitive output edge ports
+    MultiBatchState< DependencyParams >  *m_mb_dependency_params;
+    std::vector< surface::SurfaceFormat > m_sup_in_surf_formats;//支持的输入格式
+    std::vector< surface::SurfaceFormat > m_sup_aux_surf_formats;//支持的数据格式
+    std::vector< surface::SurfaceFormat > m_sup_out_surf_formats;//支持的输出格式
+    NvS16 m_taskId;//我的任务ID
+    std::map<surface::TensorSurfaceDesc*, NvU64> m_nodeTSDSurfaceOffsetInBuffer;
+    std::map<surface::TensorSurfaceDesc*, NvU32> m_nodeTSDLineStride;
+    std::map<surface::TensorSurfaceDesc*, NvU32> m_nodeTSDSurfaceStride;
+    std::map<surface::TensorSurfaceDesc*, NvU64> m_nodeTSDSurfaceSize;
+};
+```
+其次是派生类，这里会分别分析不同算子，都会有什么具体的操作，首先是ConCoreNode算子
+```
+class ConvCoreNode : public Node
+{
+public:
+    virtual std::string className() const { return std::string("ConvCoreNode"); }//定义算子名称ConvCoreNode
+
+    ConvCoreNode(NvU16 numBatches) : Node(numBatches)
+    {
+        m_engine_type   = CONVOLUTION;
+        m_mb_engine_params  = new MultiBatchState < ConvCoreEngineParams >(numBatches);
+    }
+    virtual ~ConvCoreNode() { }
+
+    // data-split can happen for conv/fc/deconv
+    struct SplitDataInfo {
+        // for split-h
+        NvS32 topSliceID;
+        NvS32 bottomSliceID;
+        NvS32 topPadding;
+        NvS32 bottomPadding;
+        // for split-w
+        NvS32 leftSliceID;
+        NvS32 rightSliceID;
+        NvS32 leftPadding;
+        NvS32 rightPadding;
+        // common
+        Dims4 inDims;
+        Dims4 outDims;
+        NvS32 numConvs;
+        NvS32 numOverlapSlices;
+        NvS32 numRetainSlices;
+
+        NvU64 inputBufferOffset;
+        NvU64 outputBufferOffset;
+
+        NvU16 wtBanks;
+        NvU16 dataBanks;
+
+        SplitDataInfo() :
+            topSliceID(-1), bottomSliceID(-1), topPadding(-1), bottomPadding(-1),
+            leftSliceID(-1), rightSliceID(-1), leftPadding(-1), rightPadding(-1),
+            numConvs(-1), numOverlapSlices(-1), numRetainSlices(-1),
+            inputBufferOffset(0), outputBufferOffset(0),
+            wtBanks(0), dataBanks(0)
+        {
+            inDims  = Dims4(0, 0, 0, 0);
+            outDims = Dims4(0, 0, 0, 0);
+        }
+    };
+
+    NvDlaError captureCanonicalWeights();
+
+    bool debugFactorization() { return false; }
+
+    virtual Dims4 suggestSurfaceDims(surface::TensorSurfaceDesc* tsd);
+    virtual NvU32 suggestLineStride(surface::TensorSurfaceDesc* tsd);
+    virtual NvU32 suggestSurfaceStride(surface::TensorSurfaceDesc* tsd);
+    virtual NvU64 suggestSurfaceSize(surface::TensorSurfaceDesc* tsd);
+    virtual NvU64 suggestSurfaceOffsetInBuffer(surface::TensorSurfaceDesc* tsd);
+    virtual NvDlaError preProcessAuxData();
+    virtual Node*   mergeWithSDPOp(SDPNode* other_op);
+    virtual NvDlaError quantizeAuxData();
+    virtual NvDlaError handleLowPrecisionConversions();
+    virtual NvDlaError fuseOnTheFlyNodes();
+    virtual NvDlaError translateAuxData();
+    virtual NvDlaError splitNodes();
+    virtual NvDlaError handleMultiBatch();
+    virtual NvDlaError resolveDataDependencies(Node* next);
+
+    virtual ConvCoreEngineParams& params(NvU16 batchId = 0) { return m_mb_engine_params->batch(batchId); }
+    virtual ConvCoreNode *clone() { return new ConvCoreNode(*this); }
+    virtual void captureCanonicalParams() { return; }
+
+    virtual NvDlaError nodeAuxEdge(engine_ast::Edge **ret_edge);
+
+    // Conv Core doesn't have a write port, so the FD o/p from conv core
+    // has to pass through SDP to be written into memory
+    SDPNode* addSDPJointOpNode(canonical_ast::Node* canConv);
+    SDPNode* addSDPJointOpNode(SDPNode* copyFromSDP);
+
+    virtual std::vector< surface::SurfaceFormat > suggestAuxSurfaceFormats(Edge* auxEdge=NULL);
+
+    NvDlaError determineWinogradParams();
+
+    SplitDataInfo& splitDataInfo()                    { return m_split_data_info; }
+    void setSplitDataInfo(const SplitDataInfo& sdi)   { m_split_data_info = sdi; }
+
+    NvDlaError processWtsForIMG();
+    NvDlaError mandatoryChnlExtForIMG();
+    NvDlaError optionalChnlExtForIMG();
+    Node*   tryToMergeWithScaleOp(SDPNode* sdp_scl_op);
+    Node*   tryToMergeWithBatchNormOp(SDPNode* sdp_bn_op);
+    NvDlaError squashWeightGroups();
+    NvDlaError splitNodesInternal();
+    NvDlaError splitData(NvU16 avlbDataBanks);
+    NvDlaError splitWeightsAndData(NvU16 avlbWtBanks, NvU16 avlbDataBanks);
+    NvDlaError determineSplitDataRatios(NvU16& avlbDataBanks, std::vector<SplitDataInfo>& splitChunks);
+
+    virtual NvDlaError verifyEdgePorts()
+    {
+        if (inputEdges().size() != 1 ||
+            auxEdges().size() != 1 ||
+            outputEdges().size() != 1)
+            return NvDlaError_BadValue;
+        else
+            return NvDlaSuccess;
+    }
+    virtual NvDlaError verifySurfaceDims(surface::TensorSurfaceDesc*);
+
+protected:
+    NvS16 calculateEPS(surface::TensorSurfaceDesc*);
+    NvU16 calculateTotalBanksForData(surface::TensorSurfaceDesc*);
+    NvU16 calculateMinBanksForWeight(surface::TensorSurfaceDesc*);
+    NvU16 calculateTotalBanksForWeight(surface::TensorSurfaceDesc*);
+    NvDlaError verifyPartialHInfo(const std::vector<SplitDataInfo>&, bool);
+    MultiBatchState < ConvCoreEngineParams > *m_mb_engine_params;
+    SplitDataInfo m_split_data_info;
+};
+```
+### 4.3.7.代码流程分析-EngineAST中间IR变换与优化PASS
+
+### 4.3.8.代码流程分析-EngineAST到后端代码Emit（代码生成）
 # 5.Tengine 与 NVDLA对接部分代码解析 #
 ## 5.1总体结构分析##
  代码在https://github.com/OAID/Tengine 仓库下的source/device/opendla目录下，代码的主要内容就是将Tengine的ir_graph转换为NVDLA的Canoncial AST
